@@ -1,0 +1,7 @@
+node_modules/
+data/
+thumbnails/
+temp/
+config/.env
+.DS_Store
+*.log
