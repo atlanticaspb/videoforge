@@ -5,6 +5,7 @@ const { google } = require('googleapis');
 const { getDb } = require('../database');
 const { indexFile } = require('./mediaIndexer');
 const { analyzePhoto, saveAnalysis } = require('./photoAnalyzer');
+const { analyzeVideo, saveVideoAnalysis } = require('./videoAnalyzer');
 
 function computeMd5(filepath) {
   const data = fs.readFileSync(filepath);
@@ -17,6 +18,11 @@ const IMAGE_MIMES = [
   'image/jpeg', 'image/png', 'image/webp', 'image/tiff', 'image/bmp',
   'image/avif', 'image/heif', 'image/heic',
 ];
+const VIDEO_MIMES = [
+  'video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska',
+  'video/webm', 'video/mpeg', 'video/3gpp',
+];
+const MEDIA_MIMES = [...IMAGE_MIMES, ...VIDEO_MIMES];
 
 function createOAuth2Client() {
   return new google.auth.OAuth2(
@@ -67,7 +73,7 @@ function getAuthedClient(tokens) {
   return client;
 }
 
-async function listPhotosInFolder(auth, folderId) {
+async function listMediaInFolder(auth, folderId) {
   const drive = google.drive({ version: 'v3', auth });
 
   const files = [];
@@ -86,9 +92,9 @@ async function listPhotosInFolder(auth, folderId) {
       if (f.mimeType === 'application/vnd.google-apps.folder') {
         // Recurse into subfolders
         console.log(`  Entering subfolder: ${f.name}`);
-        const subFiles = await listPhotosInFolder(auth, f.id);
+        const subFiles = await listMediaInFolder(auth, f.id);
         files.push(...subFiles);
-      } else if (IMAGE_MIMES.includes(f.mimeType)) {
+      } else if (MEDIA_MIMES.includes(f.mimeType)) {
         files.push(f);
       }
     }
@@ -123,7 +129,7 @@ async function downloadFile(auth, fileId, filename) {
 
 async function syncFolder(auth, folderId, thumbnailDir) {
   const db = getDb();
-  const files = await listPhotosInFolder(auth, folderId);
+  const files = await listMediaInFolder(auth, folderId);
 
   const results = { synced: 0, analyzed: 0, skipped: 0, duplicates: 0, errors: 0, total: files.length };
 
@@ -171,11 +177,19 @@ async function syncFolder(auth, folderId, thumbnailDir) {
         console.log(`  Synced: ${file.name}`);
 
         // 3. Analyze with Claude Vision (before deleting temp file)
+        const isVideo = VIDEO_MIMES.includes(file.mimeType);
         try {
-          const analysis = await analyzePhoto(tempPath, file.name);
-          saveAnalysis(mediaId, analysis);
-          results.analyzed++;
-          console.log(`    Analysis saved: ${analysis.tags_ru?.length || 0} RU tags, ${analysis.tags_en?.length || 0} EN tags`);
+          if (isVideo) {
+            const analysis = await analyzeVideo(tempPath, file.name);
+            saveVideoAnalysis(mediaId, analysis);
+            results.analyzed++;
+            console.log(`    Video analysis saved: ${analysis.frames_analyzed} frames, ${analysis.tags_ru?.length || 0} RU tags`);
+          } else {
+            const analysis = await analyzePhoto(tempPath, file.name);
+            saveAnalysis(mediaId, analysis);
+            results.analyzed++;
+            console.log(`    Analysis saved: ${analysis.tags_ru?.length || 0} RU tags, ${analysis.tags_en?.length || 0} EN tags`);
+          }
         } catch (err) {
           console.error(`    Analysis failed for ${file.name}:`, err.message);
         }

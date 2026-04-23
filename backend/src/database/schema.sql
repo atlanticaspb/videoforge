@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS media_analysis (
   media_id TEXT PRIMARY KEY REFERENCES media(id) ON DELETE CASCADE,
   document_type TEXT,
   persons TEXT,
+  person_positions TEXT,
   year_estimate TEXT,
   event TEXT,
   location TEXT,
@@ -59,6 +60,7 @@ CREATE TABLE IF NOT EXISTS media_analysis (
   description_en TEXT,
   document_text TEXT,
   document_info TEXT,
+  frames_analyzed INTEGER,
   raw_json TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

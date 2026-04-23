@@ -42,6 +42,12 @@ function runMigrations(database) {
     if (!analysisCols.includes('document_info')) {
       database.exec('ALTER TABLE media_analysis ADD COLUMN document_info TEXT');
     }
+    if (!analysisCols.includes('frames_analyzed')) {
+      database.exec('ALTER TABLE media_analysis ADD COLUMN frames_analyzed INTEGER');
+    }
+    if (!analysisCols.includes('person_positions')) {
+      database.exec('ALTER TABLE media_analysis ADD COLUMN person_positions TEXT');
+    }
   }
 }
 

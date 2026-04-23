@@ -128,6 +128,7 @@ router.get('/:id/analysis', (req, res) => {
   res.json({
     ...analysis,
     persons: JSON.parse(analysis.persons || '[]'),
+    person_positions: JSON.parse(analysis.person_positions || '{}'),
     military_equipment: JSON.parse(analysis.military_equipment || '{}'),
     uniforms: JSON.parse(analysis.uniforms || '{}'),
     document_info: JSON.parse(analysis.document_info || '{}'),
