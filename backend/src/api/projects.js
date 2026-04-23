@@ -1,6 +1,25 @@
 const express = require('express');
+const path = require('path');
+const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
+const multer = require('multer');
 const { getDb } = require('../database');
+const { buildStoryboard } = require('../services/storyboardBuilder');
+const { renderProject } = require('../services/renderer');
+
+const TEMP_DIR = path.resolve(process.env.TEMP_DIR || './temp');
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
+    cb(null, TEMP_DIR);
+  },
+  filename: (req, file, cb) => {
+    // Keep original extension for MIME detection
+    const ext = path.extname(file.originalname);
+    cb(null, `upload_${Date.now()}${ext}`);
+  },
+});
+const upload = multer({ storage });
 
 const router = express.Router();
 
@@ -56,6 +75,145 @@ router.put('/:id', (req, res) => {
 
   const updated = db.prepare('SELECT * FROM projects WHERE id = ?').get(req.params.id);
   res.json(updated);
+});
+
+// POST /api/projects/create-from-audio — build storyboard from audio
+router.post('/create-from-audio', upload.single('audio'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'audio file is required (multipart field "audio")' });
+
+  const context = {
+    period: req.body.period || null,
+    country: req.body.country || null,
+    persons: req.body.persons ? JSON.parse(req.body.persons) : [],
+    location: req.body.location || null,
+    topic: req.body.topic || null,
+    style: req.body.style || 'documentary',
+  };
+
+  try {
+    console.log(`Creating storyboard from audio: ${req.file.originalname}`);
+    const result = await buildStoryboard(req.file.path, context);
+
+    // Persist audio file to uploads/
+    const uploadsDir = path.resolve(process.env.UPLOADS_DIR || './uploads');
+    if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+    const audioExt = path.extname(req.file.originalname) || '.mp3';
+    const audioFilename = `audio_${Date.now()}${audioExt}`;
+    const audioPersistPath = path.join(uploadsDir, audioFilename);
+    fs.copyFileSync(req.file.path, audioPersistPath);
+    console.log(`  Audio saved to: ${audioPersistPath}`);
+
+    // Create project in DB
+    const db = getDb();
+    const id = uuidv4();
+    db.prepare(`
+      INSERT INTO projects (id, name, description, style, transcription, storyboard, audio_path)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      result.title || `Project from ${req.file.originalname}`,
+      `Audio: ${req.file.originalname}, ${result.scenes.length} scenes`,
+      context.style,
+      result.transcription.text,
+      JSON.stringify(result.scenes),
+      audioPersistPath
+    );
+
+    // Add selected photos to timeline
+    const insertTimeline = db.prepare(`
+      INSERT INTO project_timeline (id, project_id, media_id, track, position, sort_order)
+      VALUES (?, ?, ?, 0, ?, ?)
+    `);
+
+    let position = 0;
+    for (let i = 0; i < result.scenes.length; i++) {
+      const scene = result.scenes[i];
+      if (scene.selected_photo) {
+        insertTimeline.run(
+          uuidv4(), id, scene.selected_photo.media_id,
+          position, i
+        );
+      }
+      position += (scene.end_time - scene.start_time);
+    }
+
+    const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(id);
+
+    res.status(201).json({
+      project: {
+        ...project,
+        storyboard: JSON.parse(project.storyboard || '[]'),
+      },
+      scenes: result.scenes,
+      transcription: result.transcription,
+    });
+  } catch (err) {
+    console.error('Storyboard creation failed:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    // Clean up uploaded audio
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+  }
+});
+
+// POST /api/projects/:id/render — render storyboard to final MP4
+router.post('/:id/render', async (req, res) => {
+  const db = getDb();
+  const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  if (project.status === 'rendering') {
+    return res.status(409).json({ error: 'Project is already rendering' });
+  }
+
+  const storyboard = JSON.parse(project.storyboard || '[]');
+  if (storyboard.length === 0) {
+    return res.status(400).json({ error: 'Project has no storyboard. Use /create-from-audio first.' });
+  }
+
+  // Start render in background — respond immediately
+  res.json({
+    message: 'Render started',
+    project_id: req.params.id,
+    scenes: storyboard.length,
+    style: project.style || 'chronicle',
+    status: 'rendering',
+  });
+
+  // Run render asynchronously
+  renderProject(req.params.id)
+    .then(result => {
+      console.log(`Render finished for project ${req.params.id}: ${result.output_filename}`);
+    })
+    .catch(err => {
+      console.error(`Render failed for project ${req.params.id}:`, err.message);
+    });
+});
+
+// GET /api/projects/:id/render/status — check render progress
+router.get('/:id/render/status', (req, res) => {
+  const db = getDb();
+  const project = db.prepare('SELECT id, name, status, style, description, updated_at FROM projects WHERE id = ?').get(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  // Check if output file exists
+  const outputDir = path.resolve(process.env.OUTPUT_DIR || './output');
+  let outputFile = null;
+  if (project.status === 'done' && fs.existsSync(outputDir)) {
+    const files = fs.readdirSync(outputDir).filter(f => f.includes(req.params.id) || f.startsWith(project.name.replace(/[^a-zA-Zа-яА-ЯёЁ0-9_-]/g, '_')));
+    if (files.length > 0) {
+      const latest = files.sort().pop();
+      outputFile = {
+        filename: latest,
+        path: `/output/${latest}`,
+        size_bytes: fs.statSync(path.join(outputDir, latest)).size,
+      };
+    }
+  }
+
+  res.json({ ...project, output: outputFile });
 });
 
 // DELETE /api/projects/:id

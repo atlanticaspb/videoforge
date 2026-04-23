@@ -3,7 +3,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { google } = require('googleapis');
 const { getDb } = require('../database');
-const { indexFile } = require('./mediaIndexer');
+const { indexFile, computePhash, hammingDistance } = require('./mediaIndexer');
 const { analyzePhoto, saveAnalysis } = require('./photoAnalyzer');
 const { analyzeVideo, saveVideoAnalysis } = require('./videoAnalyzer');
 
@@ -163,6 +163,28 @@ async function syncFolder(auth, folderId, thumbnailDir) {
         results.duplicates++;
         console.log(`  Пропущен дубль (MD5): ${file.name} совпадает с ${byHash.filename}`);
         continue;
+      }
+
+      // Level 3: perceptual hash — detect visually similar images
+      const isImage = IMAGE_MIMES.includes(file.mimeType);
+      if (isImage) {
+        let phashDuplicate = false;
+        try {
+          const phash = await computePhash(tempPath);
+          const allHashes = db.prepare('SELECT id, filename, phash FROM media WHERE phash IS NOT NULL').all();
+          for (const row of allHashes) {
+            const dist = hammingDistance(phash, row.phash);
+            if (dist < 10) {
+              results.duplicates++;
+              console.log(`  Пропущен дубль (pHash, расстояние=${dist}): ${file.name} визуально совпадает с ${row.filename}`);
+              phashDuplicate = true;
+              break;
+            }
+          }
+        } catch (err) {
+          console.warn(`  pHash check failed for ${file.name}: ${err.message}`);
+        }
+        if (phashDuplicate) continue;
       }
 
       // 2. Index: extract metadata + generate thumbnail

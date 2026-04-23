@@ -4,6 +4,9 @@ const ffmpeg = require('fluent-ffmpeg');
 const Anthropic = require('@anthropic-ai/sdk');
 const { getDb } = require('../database');
 
+ffmpeg.setFfmpegPath(process.env.FFMPEG_PATH || '/opt/homebrew/bin/ffmpeg');
+ffmpeg.setFfprobePath(process.env.FFPROBE_PATH || '/opt/homebrew/bin/ffprobe');
+
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const FRAMES_DIR = path.resolve(process.env.TEMP_DIR || './temp', 'frames');
 

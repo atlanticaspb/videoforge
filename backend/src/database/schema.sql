@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS media (
   size INTEGER NOT NULL,
   thumbnail TEXT,
   md5_hash TEXT,
+  phash TEXT,
   drive_file_id TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -20,7 +21,11 @@ CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   description TEXT,
+  style TEXT DEFAULT 'documentary' CHECK(style IN ('chronicle', 'documentary', 'colorized', 'poster')),
   status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'rendering', 'done', 'error')),
+  transcription TEXT,
+  storyboard TEXT,
+  audio_path TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

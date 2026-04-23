@@ -19,6 +19,11 @@ app.use('/thumbnails', express.static(
   path.resolve(process.env.THUMBNAILS_DIR || './thumbnails')
 ));
 
+// Serve rendered output
+app.use('/output', express.static(
+  path.resolve(process.env.OUTPUT_DIR || './output')
+));
+
 // API routes
 app.use('/api/media', mediaRoutes);
 app.use('/api/projects', projectRoutes);

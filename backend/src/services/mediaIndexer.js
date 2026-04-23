@@ -6,9 +6,42 @@ const ffmpeg = require('fluent-ffmpeg');
 const sharp = require('sharp');
 const { getDb } = require('../database');
 
+ffmpeg.setFfmpegPath(process.env.FFMPEG_PATH || '/opt/homebrew/bin/ffmpeg');
+ffmpeg.setFfprobePath(process.env.FFPROBE_PATH || '/opt/homebrew/bin/ffprobe');
+
 function computeMd5(filepath) {
   const data = fs.readFileSync(filepath);
   return crypto.createHash('md5').update(data).digest('hex');
+}
+
+async function computePhash(filepath) {
+  // Resize to 8x8 grayscale, get raw pixel data
+  const { data } = await sharp(filepath)
+    .resize(8, 8, { fit: 'fill' })
+    .grayscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  // Compute average pixel value
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) sum += data[i];
+  const avg = sum / data.length;
+
+  // Build 64-bit hash: 1 if pixel >= average, 0 otherwise
+  let hash = '';
+  for (let i = 0; i < data.length; i++) {
+    hash += data[i] >= avg ? '1' : '0';
+  }
+  return hash;
+}
+
+function hammingDistance(a, b) {
+  if (!a || !b || a.length !== b.length) return Infinity;
+  let dist = 0;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) dist++;
+  }
+  return dist;
 }
 
 const VIDEO_EXTS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v']);
@@ -108,11 +141,21 @@ async function indexFile(filepath, thumbnailDir) {
 
   const md5 = computeMd5(filepath);
 
+  // Compute perceptual hash for images
+  let phash = null;
+  if (type === 'image') {
+    try {
+      phash = await computePhash(filepath);
+    } catch (err) {
+      console.warn(`Could not compute pHash for ${filepath}:`, err.message);
+    }
+  }
+
   const id = uuidv4();
   db.prepare(`
-    INSERT INTO media (id, filename, filepath, type, duration, width, height, fps, codec, size, thumbnail, md5_hash)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, path.basename(filepath), filepath, type, duration, width, height, fps, codec, stat.size, thumbnail, md5);
+    INSERT INTO media (id, filename, filepath, type, duration, width, height, fps, codec, size, thumbnail, md5_hash, phash)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, path.basename(filepath), filepath, type, duration, width, height, fps, codec, stat.size, thumbnail, md5, phash);
 
   return id;
 }
@@ -153,4 +196,4 @@ async function indexDirectory(dirPath, thumbnailDir) {
   return results;
 }
 
-module.exports = { indexFile, indexDirectory, getMediaType };
+module.exports = { indexFile, indexDirectory, getMediaType, computePhash, hammingDistance };

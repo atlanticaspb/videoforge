@@ -28,6 +28,26 @@ function runMigrations(database) {
     if (!mediaCols.includes('md5_hash')) {
       database.exec('ALTER TABLE media ADD COLUMN md5_hash TEXT');
     }
+    if (!mediaCols.includes('phash')) {
+      database.exec('ALTER TABLE media ADD COLUMN phash TEXT');
+    }
+  }
+
+  // Migrate projects table
+  const projectCols = database.pragma('table_info(projects)').map(c => c.name);
+  if (projectCols.length > 0) {
+    if (!projectCols.includes('style')) {
+      database.exec("ALTER TABLE projects ADD COLUMN style TEXT DEFAULT 'documentary'");
+    }
+    if (!projectCols.includes('transcription')) {
+      database.exec('ALTER TABLE projects ADD COLUMN transcription TEXT');
+    }
+    if (!projectCols.includes('storyboard')) {
+      database.exec('ALTER TABLE projects ADD COLUMN storyboard TEXT');
+    }
+    if (!projectCols.includes('audio_path')) {
+      database.exec('ALTER TABLE projects ADD COLUMN audio_path TEXT');
+    }
   }
 
   // Migrate media_analysis table

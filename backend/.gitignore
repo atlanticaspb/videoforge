@@ -3,6 +3,8 @@ data/
 tokens.json
 thumbnails/
 temp/
+output/
+uploads/
 config/.env
 .DS_Store
 *.log
