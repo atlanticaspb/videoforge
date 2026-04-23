@@ -1,13 +1,19 @@
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const ffmpeg = require('fluent-ffmpeg');
 const sharp = require('sharp');
 const { getDb } = require('../database');
 
+function computeMd5(filepath) {
+  const data = fs.readFileSync(filepath);
+  return crypto.createHash('md5').update(data).digest('hex');
+}
+
 const VIDEO_EXTS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v']);
 const AUDIO_EXTS = new Set(['.mp3', '.wav', '.aac', '.flac', '.ogg', '.m4a']);
-const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.tiff', '.bmp']);
+const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.tiff', '.bmp', '.avif', '.heif', '.heic']);
 
 function getMediaType(ext) {
   if (VIDEO_EXTS.has(ext)) return 'video';
@@ -100,11 +106,13 @@ async function indexFile(filepath, thumbnailDir) {
     console.warn(`Could not generate thumbnail for ${filepath}:`, err.message);
   }
 
+  const md5 = computeMd5(filepath);
+
   const id = uuidv4();
   db.prepare(`
-    INSERT INTO media (id, filename, filepath, type, duration, width, height, fps, codec, size, thumbnail)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, path.basename(filepath), filepath, type, duration, width, height, fps, codec, stat.size, thumbnail);
+    INSERT INTO media (id, filename, filepath, type, duration, width, height, fps, codec, size, thumbnail, md5_hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, path.basename(filepath), filepath, type, duration, width, height, fps, codec, stat.size, thumbnail, md5);
 
   return id;
 }

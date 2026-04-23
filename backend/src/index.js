@@ -6,7 +6,7 @@ const path = require('path');
 const { initDatabase } = require('./database');
 const mediaRoutes = require('./api/media');
 const projectRoutes = require('./api/projects');
-const { getAuthUrl, getTokensFromCode } = require('./services/googleDrive');
+const { getAuthUrl, getTokensFromCode, saveTokens } = require('./services/googleDrive');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -35,8 +35,9 @@ app.get('/api/auth/google/callback', async (req, res) => {
 
   try {
     const tokens = await getTokensFromCode(code);
+    saveTokens(tokens);
     res.json({
-      message: 'Authorized. Use these tokens in POST /api/media/sync-drive',
+      message: 'Authorized! Tokens saved to data/tokens.json. You can now use POST /api/media/sync-drive without passing tokens.',
       tokens,
     });
   } catch (err) {

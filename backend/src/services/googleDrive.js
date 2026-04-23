@@ -1,12 +1,21 @@
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { google } = require('googleapis');
 const { getDb } = require('../database');
 const { indexFile } = require('./mediaIndexer');
+const { analyzePhoto, saveAnalysis } = require('./photoAnalyzer');
 
+function computeMd5(filepath) {
+  const data = fs.readFileSync(filepath);
+  return crypto.createHash('md5').update(data).digest('hex');
+}
+
+const TOKENS_PATH = path.resolve(process.env.DB_PATH || './data/videoforge.db', '..', 'tokens.json');
 const TEMP_DIR = path.resolve(process.env.TEMP_DIR || './temp');
 const IMAGE_MIMES = [
   'image/jpeg', 'image/png', 'image/webp', 'image/tiff', 'image/bmp',
+  'image/avif', 'image/heif', 'image/heic',
 ];
 
 function createOAuth2Client() {
@@ -32,29 +41,58 @@ async function getTokensFromCode(code) {
   return tokens;
 }
 
+function saveTokens(tokens) {
+  const dir = path.dirname(TOKENS_PATH);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(TOKENS_PATH, JSON.stringify(tokens, null, 2));
+  console.log('Tokens saved to', TOKENS_PATH);
+}
+
+function loadTokens() {
+  if (!fs.existsSync(TOKENS_PATH)) return null;
+  return JSON.parse(fs.readFileSync(TOKENS_PATH, 'utf-8'));
+}
+
 function getAuthedClient(tokens) {
   const client = createOAuth2Client();
   client.setCredentials(tokens);
+
+  // Auto-save refreshed tokens
+  client.on('tokens', (newTokens) => {
+    const merged = { ...tokens, ...newTokens };
+    saveTokens(merged);
+    console.log('Tokens auto-refreshed and saved');
+  });
+
   return client;
 }
 
 async function listPhotosInFolder(auth, folderId) {
   const drive = google.drive({ version: 'v3', auth });
 
-  const mimeQuery = IMAGE_MIMES.map(m => `mimeType='${m}'`).join(' or ');
-  const query = `'${folderId}' in parents and (${mimeQuery}) and trashed=false`;
-
   const files = [];
-  let pageToken = null;
 
+  // Get all items in this folder (photos + subfolders)
+  let pageToken = null;
   do {
     const res = await drive.files.list({
-      q: query,
+      q: `'${folderId}' in parents and trashed=false`,
       fields: 'nextPageToken, files(id, name, mimeType, size)',
       pageSize: 100,
       pageToken,
     });
-    files.push(...res.data.files);
+
+    for (const f of res.data.files) {
+      if (f.mimeType === 'application/vnd.google-apps.folder') {
+        // Recurse into subfolders
+        console.log(`  Entering subfolder: ${f.name}`);
+        const subFiles = await listPhotosInFolder(auth, f.id);
+        files.push(...subFiles);
+      } else if (IMAGE_MIMES.includes(f.mimeType)) {
+        files.push(f);
+      }
+    }
+
     pageToken = res.data.nextPageToken;
   } while (pageToken);
 
@@ -87,10 +125,10 @@ async function syncFolder(auth, folderId, thumbnailDir) {
   const db = getDb();
   const files = await listPhotosInFolder(auth, folderId);
 
-  const results = { synced: 0, skipped: 0, errors: 0, total: files.length };
+  const results = { synced: 0, analyzed: 0, skipped: 0, duplicates: 0, errors: 0, total: files.length };
 
   for (const file of files) {
-    // Skip if already synced
+    // Level 0: skip if already synced by drive_file_id
     const existing = db.prepare('SELECT id FROM media WHERE drive_file_id = ?').get(file.id);
     if (existing) {
       results.skipped++;
@@ -98,22 +136,49 @@ async function syncFolder(auth, folderId, thumbnailDir) {
       continue;
     }
 
+    // Level 1: skip if filename already exists in DB
+    const byName = db.prepare('SELECT id FROM media WHERE filename = ?').get(file.name);
+    if (byName) {
+      results.duplicates++;
+      console.log(`  Пропущен дубль (имя файла): ${file.name}`);
+      continue;
+    }
+
     let tempPath;
     try {
-      // Download to temp/
+      // 1. Download to temp/
       console.log(`  Downloading: ${file.name}`);
       tempPath = await downloadFile(auth, file.id, file.name);
 
-      // Index: extract metadata + generate thumbnail
+      // Level 2: skip if MD5 hash already exists in DB
+      const md5 = computeMd5(tempPath);
+      const byHash = db.prepare('SELECT id, filename FROM media WHERE md5_hash = ?').get(md5);
+      if (byHash) {
+        results.duplicates++;
+        console.log(`  Пропущен дубль (MD5): ${file.name} совпадает с ${byHash.filename}`);
+        continue;
+      }
+
+      // 2. Index: extract metadata + generate thumbnail
       const mediaId = await indexFile(tempPath, thumbnailDir);
 
       if (mediaId) {
-        // Mark as Drive-sourced and update filepath to virtual path
+        // Mark as Drive-sourced
         db.prepare(
           "UPDATE media SET drive_file_id = ?, filepath = ? WHERE id = ?"
         ).run(file.id, `gdrive://${file.id}`, mediaId);
         results.synced++;
         console.log(`  Synced: ${file.name}`);
+
+        // 3. Analyze with Claude Vision (before deleting temp file)
+        try {
+          const analysis = await analyzePhoto(tempPath, file.name);
+          saveAnalysis(mediaId, analysis);
+          results.analyzed++;
+          console.log(`    Analysis saved: ${analysis.tags_ru?.length || 0} RU tags, ${analysis.tags_en?.length || 0} EN tags`);
+        } catch (err) {
+          console.error(`    Analysis failed for ${file.name}:`, err.message);
+        }
       } else {
         results.skipped++;
       }
@@ -121,7 +186,7 @@ async function syncFolder(auth, folderId, thumbnailDir) {
       results.errors++;
       console.error(`  Error syncing ${file.name}:`, err.message);
     } finally {
-      // Always clean up temp file
+      // 4. Always clean up temp file
       if (tempPath && fs.existsSync(tempPath)) {
         fs.unlinkSync(tempPath);
       }
@@ -136,5 +201,7 @@ module.exports = {
   getAuthUrl,
   getTokensFromCode,
   getAuthedClient,
+  saveTokens,
+  loadTokens,
   syncFolder,
 };
