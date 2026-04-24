@@ -24,9 +24,12 @@ app.use('/output', express.static(
   path.resolve(process.env.OUTPUT_DIR || './output')
 ));
 
+const musicRoutes = require('./api/music');
+
 // API routes
 app.use('/api/media', mediaRoutes);
 app.use('/api/projects', projectRoutes);
+app.use('/api/music', musicRoutes);
 
 // Google OAuth2 flow
 app.get('/api/auth/google', (req, res) => {

@@ -194,6 +194,72 @@ function buildFilterChain(style, intensity = 0.7) {
   };
 }
 
+// --- Mood-based color grading ---
+
+function colorGrade(mood) {
+  const grades = {
+    'тревожное': {
+      // Red-orange alarming tone: boost reds, crush shadows warm
+      filter: 'eq=saturation=0.7:contrast=1.1,colorbalance=rs=0.3:gs=-0.1:bs=-0.2:rh=0.1:gh=-0.05:bh=-0.1',
+      description: 'red-orange alarm',
+    },
+    'триумфальное': {
+      // Golden warm tone: high contrast, warm highlights
+      filter: 'eq=saturation=0.85:contrast=1.15:brightness=0.03,colorbalance=rs=0.15:gs=0.08:bs=-0.1:rh=0.1:gh=0.05:bh=-0.05',
+      description: 'golden triumph',
+    },
+    'трагическое': {
+      // Cold blue desaturated: 40% desat + blue shadows
+      filter: 'eq=saturation=0.6:contrast=1.05,colorbalance=rs=-0.15:gs=-0.05:bs=0.25:rh=-0.1:gh=0.0:bh=0.15',
+      description: 'cold blue tragedy',
+    },
+    'мрачное': {
+      // Dark desaturated with slight green
+      filter: 'eq=saturation=0.65:contrast=1.1:brightness=-0.03,colorbalance=rs=-0.05:gs=0.05:bs=0.0:rh=-0.05:gh=0.0:bh=0.05',
+      description: 'dark ominous',
+    },
+    'рабочее': {
+      // Slightly green industrial tone
+      filter: 'eq=saturation=0.8:contrast=1.05,colorbalance=rs=-0.05:gs=0.1:bs=-0.05:rh=-0.03:gh=0.05:bh=-0.03',
+      description: 'industrial green',
+    },
+    'торжественное': {
+      // Warm sepia-like but richer
+      filter: 'eq=saturation=0.75:contrast=1.1,colorbalance=rs=0.1:gs=0.05:bs=-0.08:rh=0.05:gh=0.02:bh=-0.05',
+      description: 'warm ceremonial',
+    },
+    'спокойное': {
+      // Neutral warm
+      filter: 'eq=saturation=0.85,colorbalance=rs=0.05:gs=0.02:bs=-0.03',
+      description: 'neutral warm',
+    },
+  };
+
+  const grade = grades[mood] || grades['спокойное'];
+  return grade;
+}
+
+// --- Red dramatic background for fallback portraits ---
+
+function redDramaticPortrait() {
+  // Creates a cinematic red-tinted portrait:
+  // 1. Convert photo to high-contrast B&W
+  // 2. Overlay on dark red gradient background
+  // 3. Heavy vignette
+  return {
+    // Process as filter_complex with split:
+    // Input → B&W contrast → blend with red
+    photoFilter: 'hue=s=0,eq=contrast=1.4:brightness=-0.05',
+    // Red tint overlay via colorbalance on the B&W image
+    redTint: 'colorbalance=rs=0.4:gs=-0.1:bs=-0.15:rm=0.3:gm=-0.05:bm=-0.1',
+    // Heavy vignette
+    vignetteFilter: 'vignette=angle=0.8*PI',
+    // Combined single-chain filter
+    combined: 'hue=s=0,eq=contrast=1.4:brightness=-0.05,colorbalance=rs=0.4:gs=-0.1:bs=-0.15:rm=0.3:gm=-0.05:bm=-0.1,vignette=angle=0.8*PI',
+    description: 'red dramatic portrait',
+  };
+}
+
 module.exports = {
   // Individual effects
   filmGrain,
@@ -207,6 +273,9 @@ module.exports = {
   countdownLeader,
   reelChange,
   spliceMark,
+  // Color grading
+  colorGrade,
+  redDramaticPortrait,
   // Presets
   applyFilmStyle,
   buildFilterChain,

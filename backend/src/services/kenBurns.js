@@ -32,9 +32,9 @@ function positionToCoords(pos) {
 const movements = {
   zoom_in_center(duration, fps) {
     const totalFrames = Math.round(duration * fps);
-    // Zoom from 1.0 to 1.35 over duration
+    // Zoom from 1.0 to 1.4 — noticeable push
     return {
-      z: `min(1+0.35*on/${totalFrames},1.35)`,
+      z: `min(1+0.4*on/${totalFrames},1.4)`,
       x: `(iw/2)-(iw/zoom/2)`,
       y: `(ih/2)-(ih/zoom/2)`,
     };
@@ -42,9 +42,9 @@ const movements = {
 
   zoom_in_person(duration, fps, targetX = 0.5, targetY = 0.5) {
     const totalFrames = Math.round(duration * fps);
-    // Zoom toward the person's position
+    // Zoom to 1.6 toward the person — tight closeup
     return {
-      z: `min(1+0.45*on/${totalFrames},1.45)`,
+      z: `min(1+0.6*on/${totalFrames},1.6)`,
       x: `${targetX}*iw-(iw/zoom/2)`,
       y: `${targetY}*ih-(ih/zoom/2)`,
     };
@@ -52,28 +52,29 @@ const movements = {
 
   pan_left_to_right(duration, fps) {
     const totalFrames = Math.round(duration * fps);
-    // Slight zoom (1.2x) + pan from left edge to right edge
+    // 1.3x zoom + pan 25% of frame width
     return {
-      z: '1.2',
-      x: `(iw/zoom-iw)*on/${totalFrames}`,
+      z: '1.3',
+      x: `(iw*0.25)*on/${totalFrames}`,
       y: `(ih/2)-(ih/zoom/2)`,
     };
   },
 
   pan_right_to_left(duration, fps) {
     const totalFrames = Math.round(duration * fps);
+    // 1.3x zoom + reverse pan 25%
     return {
-      z: '1.2',
-      x: `(iw/zoom-iw)*(1-on/${totalFrames})`,
+      z: '1.3',
+      x: `(iw*0.25)*(1-on/${totalFrames})`,
       y: `(ih/2)-(ih/zoom/2)`,
     };
   },
 
   zoom_out(duration, fps) {
     const totalFrames = Math.round(duration * fps);
-    // Start zoomed in at 1.4, pull back to 1.0
+    // Start zoomed in at 1.5, pull back to 1.0 — dramatic reveal
     return {
-      z: `max(1.4-0.4*on/${totalFrames},1.0)`,
+      z: `max(1.5-0.5*on/${totalFrames},1.0)`,
       x: `(iw/2)-(iw/zoom/2)`,
       y: `(ih/2)-(ih/zoom/2)`,
     };
@@ -81,14 +82,55 @@ const movements = {
 
   dramatic_push(duration, fps, targetX = 0.5, targetY = 0.5) {
     const totalFrames = Math.round(duration * fps);
-    // Fast zoom with easing (quadratic) toward target
+    // Aggressive zoom to 1.8 with cubic easing — punchy climax
     return {
-      z: `min(1+0.6*pow(on/${totalFrames},2),1.6)`,
+      z: `min(1+0.8*pow(on/${totalFrames},2),1.8)`,
       x: `${targetX}*iw-(iw/zoom/2)`,
       y: `${targetY}*ih-(ih/zoom/2)`,
     };
   },
 };
+
+// --- Duration-aware filter builder ---
+
+function buildDurationAwareFilter(movementType, duration, fps, targetX, targetY) {
+  const totalFrames = Math.round(duration * fps);
+
+  // Short scenes (< 4s): slow down movement to 0.7x speed
+  if (duration < 4) {
+    const slowDuration = duration / 0.7;
+    const moveFn = movements[movementType];
+    const params = moveFn(slowDuration, fps, targetX, targetY);
+    return {
+      filter: `zoompan=z='${params.z}':x='${params.x}':y='${params.y}':d=${totalFrames}:s=${OUT_W}x${OUT_H}:fps=${fps}`,
+      compound: false,
+    };
+  }
+
+  // Long scenes (> 8s): compound movement — zoom first half, then pan second half
+  if (duration > 8) {
+    const halfFrames = Math.round(totalFrames / 2);
+    // First half: zoom_in_center
+    const zoomEnd = 1.3;
+    // Second half: hold zoom + pan right
+    const panRange = 0.15; // 15% of frame
+    const z = `if(lt(on,${halfFrames}),min(1+${zoomEnd - 1}*on/${halfFrames},${zoomEnd}),${zoomEnd})`;
+    const x = `if(lt(on,${halfFrames}),(iw/2)-(iw/zoom/2),(iw/2)-(iw/zoom/2)+(iw*${panRange})*(on-${halfFrames})/${halfFrames})`;
+    const y = `(ih/2)-(ih/zoom/2)`;
+    return {
+      filter: `zoompan=z='${z}':x='${x}':y='${y}':d=${totalFrames}:s=${OUT_W}x${OUT_H}:fps=${fps}`,
+      compound: true,
+    };
+  }
+
+  // Normal duration: standard movement
+  const moveFn = movements[movementType];
+  const params = moveFn(duration, fps, targetX, targetY);
+  return {
+    filter: `zoompan=z='${params.z}':x='${params.x}':y='${params.y}':d=${totalFrames}:s=${OUT_W}x${OUT_H}:fps=${fps}`,
+    compound: false,
+  };
+}
 
 // --- Smart movement selection ---
 
@@ -120,16 +162,15 @@ function smartKenBurns(photoAnalysis, duration, options = {}) {
     throw new Error(`Unknown movement: ${movementType}. Available: ${Object.keys(movements).join(', ')}`);
   }
 
-  const params = moveFn(duration, fps, targetX, targetY);
   const totalFrames = Math.round(duration * fps);
 
-  // Build zoompan filter
-  // Renderer pre-scales input to 1920x1080; zoompan works on that
-  const filter = `zoompan=z='${params.z}':x='${params.x}':y='${params.y}':d=${totalFrames}:s=${OUT_W}x${OUT_H}:fps=${fps}`;
+  // Use duration-aware builder for short/long scenes
+  const { filter, compound } = buildDurationAwareFilter(movementType, duration, fps, targetX, targetY);
 
   return {
     filter,
     movement: movementType,
+    compound,
     targetX,
     targetY,
     duration,
@@ -215,9 +256,44 @@ async function kenBurnsForScene(sceneText, photoAnalysis, duration, options = {}
   };
 }
 
+// --- Parallax effect: 2-layer depth illusion ---
+
+function parallaxEffect(duration, fps = 24) {
+  const totalFrames = Math.round(duration * fps);
+
+  // filter_complex with two layers from a single input:
+  // [0:v] → split into background (full, blurred, slow zoom) and foreground (center crop, sharp, faster zoom)
+  // Then overlay foreground on background
+
+  const bgZoom = `min(1+0.15*on/${totalFrames},1.15)`;    // slow: 1.0 → 1.15
+  const fgZoom = `min(1+0.35*on/${totalFrames},1.35)`;    // fast: 1.0 → 1.35
+
+  const filterComplex = [
+    // Split input into bg and fg
+    `split[par_bg][par_fg]`,
+    // Background: full frame, blur, slow zoom
+    `[par_bg]gblur=sigma=3,zoompan=z='${bgZoom}':x='(iw/2)-(iw/zoom/2)':y='(ih/2)-(ih/zoom/2)':d=${totalFrames}:s=${OUT_W}x${OUT_H}:fps=${fps}[bg_out]`,
+    // Foreground: crop center 60%, sharp, faster zoom in opposite direction (slight left drift)
+    `[par_fg]crop=iw*0.6:ih*0.6:iw*0.2:ih*0.2,scale=${OUT_W}:${OUT_H},zoompan=z='${fgZoom}':x='(iw/2)-(iw/zoom/2)+(iw*0.03*on/${totalFrames})':y='(ih/2)-(ih/zoom/2)':d=${totalFrames}:s=${OUT_W}x${OUT_H}:fps=${fps},format=yuva420p,colorchannelmixer=aa=0.85[fg_out]`,
+    // Overlay foreground on background
+    `[bg_out][fg_out]overlay=format=auto`,
+  ].join(';');
+
+  return {
+    filterComplex,
+    isComplex: true, // needs -filter_complex, not -vf
+    duration,
+    fps,
+    totalFrames,
+    movement: 'parallax',
+  };
+}
+
 module.exports = {
   smartKenBurns,
   selectMovement,
   kenBurnsForScene,
+  buildDurationAwareFilter,
+  parallaxEffect,
   movements: Object.keys(movements),
 };

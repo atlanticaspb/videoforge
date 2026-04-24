@@ -3,10 +3,11 @@ const path = require('path');
 const { execSync, spawn } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
 const { getDb } = require('../database');
-const { kenBurnsForScene, smartKenBurns } = require('./kenBurns');
-const { buildFilterChain, countdownLeader } = require('./filmEffects');
+const { kenBurnsForScene, smartKenBurns, parallaxEffect } = require('./kenBurns');
+const { buildFilterChain, countdownLeader, colorGrade, redDramaticPortrait } = require('./filmEffects');
 const { loadTokens, getAuthedClient } = require('./googleDrive');
 const { google } = require('googleapis');
+const { selectForProject } = require('./musicSelector');
 
 const FFMPEG_PATH = process.env.FFMPEG_PATH || '/opt/homebrew/bin/ffmpeg';
 const TEMP_DIR = path.resolve(process.env.TEMP_DIR || './temp');
@@ -167,6 +168,48 @@ async function findBestImage(media, cacheDir) {
   return null;
 }
 
+// --- Scene transitions ---
+
+const TRANSITIONS = {
+  fade_black: { duration: 0.5, fadeOut: 'fade=t=out:st={end}:d=0.5', fadeIn: 'fade=t=in:d=0.5' },
+  fade_white: { duration: 0.3, fadeOut: 'fade=t=out:st={end}:d=0.3:color=white', fadeIn: 'fade=t=in:d=0.3:color=white' },
+  dissolve: { duration: 0.7, fadeOut: 'fade=t=out:st={end}:d=0.7', fadeIn: 'fade=t=in:d=0.7' },
+  film_burn: { duration: 0.4, fadeOut: 'fade=t=out:st={end}:d=0.4:color=white', fadeIn: 'fade=t=in:d=0.4:color=white' },
+  film_tear: { duration: 0.3, fadeOut: 'fade=t=out:st={end}:d=0.3', fadeIn: 'fade=t=in:d=0.3' },
+  wipe_left: { duration: 0.4, fadeOut: 'fade=t=out:st={end}:d=0.4', fadeIn: 'fade=t=in:d=0.4' },
+  hard_cut: { duration: 0, fadeOut: null, fadeIn: null },
+};
+
+const MOOD_TRANSITIONS = {
+  'тревожное': ['film_burn', 'film_tear'],
+  'трагическое': ['film_burn', 'fade_black'],
+  'торжественное': ['dissolve', 'fade_white'],
+  'триумфальное': ['fade_white', 'dissolve'],
+  'рабочее': ['hard_cut', 'fade_black'],
+  'нейтральное': ['hard_cut', 'fade_black'],
+  'спокойное': ['dissolve', 'fade_black'],
+  'мрачное': ['film_burn', 'fade_black'],
+  'официальное': ['dissolve', 'fade_black'],
+  'индустриальное': ['hard_cut', 'wipe_left'],
+};
+
+function selectTransition(scene, sceneIndex) {
+  const mood = scene.photo_mood || scene.mood || 'нейтральное';
+  const candidates = MOOD_TRANSITIONS[mood] || MOOD_TRANSITIONS['нейтральное'];
+  // Alternate between the two options for variety
+  return candidates[sceneIndex % candidates.length];
+}
+
+function applyTransitionFilters(filterComplex, transitionType, duration) {
+  const t = TRANSITIONS[transitionType];
+  if (!t || !t.fadeOut) return filterComplex; // hard_cut — no change
+
+  const fadeOutTime = Math.max(0, duration - t.duration);
+  const fadeOutFilter = t.fadeOut.replace('{end}', fadeOutTime.toFixed(2));
+
+  return `${filterComplex},${fadeOutFilter},${t.fadeIn}`;
+}
+
 // --- Render one scene: photo → Ken Burns video clip with film effects ---
 
 async function renderScene(scene, index, style, intensity, workDir) {
@@ -184,10 +227,12 @@ async function renderScene(scene, index, style, intensity, workDir) {
     return null;
   }
 
-  const duration = scene.end_time - scene.start_time;
+  // Use adjusted duration if available (even scenes slower)
+  const duration = scene.adjusted_duration || (scene.end_time - scene.start_time);
   if (duration <= 0) return null;
 
   const outputPath = path.join(workDir, `scene_${String(index).padStart(3, '0')}.mp4`);
+  const isFallback = scene.is_fallback_portrait || false;
 
   // Get photo analysis for Ken Burns
   const analysis = db.prepare('SELECT * FROM media_analysis WHERE media_id = ?').get(photo.media_id);
@@ -202,25 +247,70 @@ async function renderScene(scene, index, style, intensity, workDir) {
     };
   }
 
-  // Get Ken Burns movement — use Claude for selection
+  // Ken Burns: use pre-assigned rotation movement, or fall back to Claude selection
   let kbFilter;
-  try {
-    const kb = await kenBurnsForScene(scene.narration || '', parsedAnalysis, duration);
+  const presetMovement = scene.kb_movement;
+  const targetPerson = scene.is_fallback_portrait ? scene.selected_photo?.fallback_person : null;
+
+  if (presetMovement) {
+    const kb = smartKenBurns(parsedAnalysis, duration, {
+      movement: presetMovement,
+      targetPerson,
+    });
     kbFilter = kb.filter;
-    console.log(`    Scene ${index + 1}: ${kb.movement}${kb.target_person ? ' → ' + kb.target_person : ''} (${duration.toFixed(1)}s)`);
-  } catch (err) {
-    console.warn(`    Scene ${index + 1}: Ken Burns selection failed, using zoom_in_center`);
-    const kb = smartKenBurns(parsedAnalysis, duration, { movement: 'zoom_in_center' });
-    kbFilter = kb.filter;
+    console.log(`    Scene ${index + 1}: ${presetMovement}${targetPerson ? ' → ' + targetPerson : ''} (${duration.toFixed(1)}s)${isFallback ? ' [FALLBACK]' : ''}`);
+  } else {
+    try {
+      const kb = await kenBurnsForScene(scene.narration || '', parsedAnalysis, duration);
+      kbFilter = kb.filter;
+      console.log(`    Scene ${index + 1}: ${kb.movement}${kb.target_person ? ' → ' + kb.target_person : ''} (${duration.toFixed(1)}s)`);
+    } catch (err) {
+      console.warn(`    Scene ${index + 1}: Ken Burns selection failed, using zoom_in_center`);
+      const kb = smartKenBurns(parsedAnalysis, duration, { movement: 'zoom_in_center' });
+      kbFilter = kb.filter;
+    }
   }
 
   // Get film effects for the style
   const fx = buildFilterChain(style, intensity);
 
-  // Filter chain: upscale to 1920x1080 → Ken Burns zoompan → film effects
-  // Ken Burns already includes scale=8000:-1 for smooth zoom, so we replace it
-  // with a proper scale to 1920:1080 first, then zoompan at high res
-  const filterComplex = `scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,${kbFilter},${fx.filterString},format=yuv420p`;
+  // Mood-based color grading
+  const sceneMood = scene.photo_mood || scene.mood || 'нейтральное';
+  const grade = colorGrade(sceneMood);
+  const gradeFilter = grade.filter ? `,${grade.filter}` : '';
+  if (grade.description !== 'neutral warm') {
+    console.log(`      Color grade: ${grade.description} (mood: ${sceneMood})`);
+  }
+
+  // Select transition based on mood
+  const transitionType = selectTransition(scene, index);
+  if (transitionType !== 'hard_cut') {
+    console.log(`      Transition: ${transitionType}`);
+  }
+
+  // --- Build filter chain based on scene type ---
+  const sceneNum = scene.scene_number || index + 1;
+
+  let filterComplex;
+
+  if (isFallback) {
+    const redFx = redDramaticPortrait();
+    console.log(`      [effect] red_dramatic_portrait scene ${sceneNum}`);
+    filterComplex = `scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,${kbFilter},${redFx.combined},${fx.filterString}`;
+
+  } else if (presetMovement === 'parallax' || (scene.preferred_shot_type === 'панорама' && duration >= 5)) {
+    const par = parallaxEffect(duration);
+    console.log(`      [effect] parallax scene ${sceneNum}`);
+    filterComplex = `scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,${par.filterComplex},${fx.filterString}${gradeFilter}`;
+
+  } else {
+    console.log(`      [effect] standard scene ${sceneNum} | kb=${presetMovement || 'auto'} | grade=${grade.description} | transition=${transitionType}`);
+    filterComplex = `scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,${kbFilter},${fx.filterString}${gradeFilter}`;
+  }
+
+  // Apply transition fades (per-scene fade in/out)
+  filterComplex = applyTransitionFilters(filterComplex, transitionType, duration);
+  filterComplex += ',format=yuv420p';
 
   await ffmpeg([
     '-loop', '1', '-i', imagePath,
@@ -254,25 +344,92 @@ async function renderCountdown(style, workDir, fps = 24) {
   return outputPath;
 }
 
-// --- Concatenate scene clips + audio → final video ---
+// --- Concatenate scene clips + audio with music ducking ---
 
-async function concatenateScenes(scenePaths, audioPath, outputPath, workDir) {
-  // Write concat list
-  const listPath = path.join(workDir, 'concat.txt');
-  const listContent = scenePaths.map(p => `file '${p}'`).join('\n');
-  fs.writeFileSync(listPath, listContent);
-
-  // Concat video segments — copy codec (scenes already encoded at high quality)
+async function concatenateScenes(scenePaths, audioPath, musicPath, outputPath, workDir) {
   const silentPath = path.join(workDir, 'silent.mp4');
-  await ffmpeg([
-    '-f', 'concat', '-safe', '0', '-i', listPath,
-    '-c:v', 'copy',
-    '-movflags', '+faststart',
-    silentPath,
-  ], 'concat scenes');
+  const XFADE_TYPES = ['fade', 'dissolve', 'wipeleft', 'slideleft'];
+  const XFADE_DUR = 0.5;
 
-  // Overlay audio if available
-  if (audioPath && fs.existsSync(audioPath)) {
+  if (scenePaths.length === 1) {
+    // Single scene — just copy
+    await ffmpeg(['-i', scenePaths[0], '-c', 'copy', silentPath], 'copy single scene');
+
+  } else if (scenePaths.length <= 12) {
+    // xfade chain: smooth transitions between scenes
+    // Build: -i s0 -i s1 -i s2 ... -filter_complex "[0][1]xfade=...[v01];[v01][2]xfade=...[v012];..."
+    console.log(`  [render] Building xfade chain (${scenePaths.length} scenes, ${XFADE_DUR}s transitions)`);
+
+    const inputs = [];
+    scenePaths.forEach(p => inputs.push('-i', p));
+
+    // Get durations via ffprobe
+    const ffprobePath = FFMPEG_PATH.replace(/ffmpeg$/, 'ffprobe');
+    const durations = scenePaths.map(p => {
+      try {
+        const d = execSync(`"${ffprobePath}" -v error -show_entries format=duration -of csv=p=0 "${p}"`, { encoding: 'utf-8' }).trim();
+        return parseFloat(d) || 5;
+      } catch { return 5; }
+    });
+
+    const filters = [];
+    let prevLabel = '[0:v]';
+    let offset = durations[0] - XFADE_DUR;
+
+    for (let i = 1; i < scenePaths.length; i++) {
+      const xtype = XFADE_TYPES[i % XFADE_TYPES.length];
+      const outLabel = i === scenePaths.length - 1 ? '[vout]' : `[v${i}]`;
+      filters.push(`${prevLabel}[${i}:v]xfade=transition=${xtype}:duration=${XFADE_DUR}:offset=${offset.toFixed(2)}${outLabel}`);
+      console.log(`      [xfade] scene ${i}→${i + 1}: ${xtype} at ${offset.toFixed(1)}s`);
+      prevLabel = outLabel;
+      offset += durations[i] - XFADE_DUR;
+    }
+
+    await ffmpeg([
+      ...inputs,
+      '-filter_complex', filters.join(';'),
+      '-map', '[vout]',
+      '-c:v', 'libx264', '-preset', 'slow', '-crf', '18',
+      '-pix_fmt', 'yuv420p',
+      '-movflags', '+faststart',
+      silentPath,
+    ], 'xfade scenes');
+
+  } else {
+    // Too many scenes for xfade (ffmpeg filter complexity limit) — fallback to concat
+    console.log('  [render] Too many scenes for xfade, using concat');
+    const listPath = path.join(workDir, 'concat.txt');
+    fs.writeFileSync(listPath, scenePaths.map(p => `file '${p}'`).join('\n'));
+    await ffmpeg([
+      '-f', 'concat', '-safe', '0', '-i', listPath,
+      '-c:v', 'copy', '-movflags', '+faststart',
+      silentPath,
+    ], 'concat scenes');
+  }
+
+  const hasVoice = audioPath && fs.existsSync(audioPath);
+  const hasMusic = musicPath && fs.existsSync(musicPath);
+
+  if (hasVoice && hasMusic) {
+    // Voice + music: simple amix, music at 10% volume
+    console.log('  [render] Mixing: voice + music (simple mix)');
+
+    await ffmpeg([
+      '-i', silentPath,
+      '-i', audioPath,
+      '-stream_loop', '-1', '-i', musicPath,
+      '-filter_complex',
+      '[2:a]volume=0.1[m];[1:a][m]amix=inputs=2:duration=first[a]',
+      '-map', '0:v:0', '-map', '[a]',
+      '-c:v', 'copy',
+      '-c:a', 'aac', '-b:a', '192k',
+      '-shortest',
+      outputPath,
+    ], 'mix voice + music');
+
+  } else if (hasVoice) {
+    // Voice only — normalize and merge
+    console.log('  [render] Mixing: voice only (no music)');
     await ffmpeg([
       '-i', silentPath,
       '-i', audioPath,
@@ -281,9 +438,25 @@ async function concatenateScenes(scenePaths, audioPath, outputPath, workDir) {
       '-map', '0:v:0', '-map', '1:a:0',
       '-shortest',
       outputPath,
-    ], 'merge audio');
+    ], 'merge voice');
+
+  } else if (hasMusic) {
+    // Music only — loop, fade in/out
+    console.log('  [render] Mixing: music only (no voice)');
+    await ffmpeg([
+      '-i', silentPath,
+      '-stream_loop', '-1', '-i', musicPath,
+      '-filter_complex', '[1:a]volume=0.25,afade=t=in:d=2[music]',
+      '-map', '0:v:0', '-map', '[music]',
+      '-c:v', 'copy',
+      '-c:a', 'aac', '-b:a', '192k',
+      '-shortest',
+      outputPath,
+    ], 'merge music');
+
   } else {
-    // No audio — just add silent audio track for compatibility
+    // No audio at all — silent track
+    console.log('  [render] No audio — adding silent track');
     await ffmpeg([
       '-i', silentPath,
       '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
@@ -418,14 +591,26 @@ async function renderProject(projectId) {
 
     if (audioPath) {
       const audioSize = (fs.statSync(audioPath).size / 1024).toFixed(0);
-      console.log(`  [render] Audio: ${audioPath} (${audioSize} KB)`);
+      console.log(`  [render] Voice: ${audioPath} (${audioSize} KB)`);
     } else {
-      console.log('  [render] No audio track — output will be silent');
+      console.log('  [render] No voice track');
     }
 
-    // 3. Concatenate + merge audio
+    // 2b. Select background music
+    let musicPath = null;
+    const sceneMoods = scenes.map(s => s.photo_mood || s.mood || 'нейтральное');
+    const selectedMusic = selectForProject(sceneMoods);
+    if (selectedMusic) {
+      musicPath = selectedMusic.path;
+      const musicSize = (fs.statSync(musicPath).size / 1024).toFixed(0);
+      console.log(`  [render] Music: ${selectedMusic.filename} (${musicSize} KB, mood: ${selectedMusic.mood})`);
+    } else {
+      console.log('  [render] No background music (music/ folder empty)');
+    }
+
+    // 3. Concatenate + merge audio with ducking
     console.log(`  [render] Concatenating ${scenePaths.length} clips...`);
-    await concatenateScenes(scenePaths, audioPath, outputPath, workDir);
+    await concatenateScenes(scenePaths, audioPath, musicPath, outputPath, workDir);
 
     // 4. Update project
     const stat = fs.statSync(outputPath);

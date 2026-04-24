@@ -68,6 +68,18 @@ function runMigrations(database) {
     if (!analysisCols.includes('person_positions')) {
       database.exec('ALTER TABLE media_analysis ADD COLUMN person_positions TEXT');
     }
+    if (!analysisCols.includes('persons_count')) {
+      database.exec('ALTER TABLE media_analysis ADD COLUMN persons_count TEXT');
+    }
+    if (!analysisCols.includes('emotion')) {
+      database.exec('ALTER TABLE media_analysis ADD COLUMN emotion TEXT');
+    }
+    if (!analysisCols.includes('photo_mood')) {
+      database.exec('ALTER TABLE media_analysis ADD COLUMN photo_mood TEXT');
+    }
+    if (!analysisCols.includes('is_memorial')) {
+      database.exec('ALTER TABLE media_analysis ADD COLUMN is_memorial INTEGER DEFAULT 0');
+    }
   }
 }
 

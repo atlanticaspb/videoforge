@@ -5,6 +5,7 @@ thumbnails/
 temp/
 output/
 uploads/
+music/
 config/.env
 .DS_Store
 *.log
